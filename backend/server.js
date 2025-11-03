@@ -2,12 +2,38 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+const admin = require('firebase-admin');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Initialize Firebase Admin SDK
+const serviceAccount = {
+  type: "service_account",
+  project_id: process.env.FIREBASE_PROJECT_ID,
+  private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+  private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+  client_email: process.env.FIREBASE_CLIENT_EMAIL,
+  client_id: process.env.FIREBASE_CLIENT_ID,
+  auth_uri: process.env.FIREBASE_AUTH_URI,
+  token_uri: process.env.FIREBASE_TOKEN_URI,
+  auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
+  client_x509_cert_url: `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(process.env.FIREBASE_CLIENT_EMAIL)}`
+};
+
+try {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+  console.log('✅ Firebase Admin SDK initialized successfully');
+} catch (error) {
+  console.error('❌ Firebase Admin SDK initialization error:', error);
+}
+
+const db = admin.firestore();
+
 // OMDb API configuration
-const OMDB_API_KEY = '83be6d4a';
+const OMDB_API_KEY = process.env.OMDB_API_KEY || '83be6d4a';
 const OMDB_BASE_URL = 'http://www.omdbapi.com/';
 
 // Middleware
@@ -15,30 +41,33 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Simple authentication middleware (verify Firebase UID exists)
+// Enhanced authentication middleware (verify Firebase token)
 const authenticateUser = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
-    const firebaseUid = authHeader && authHeader.split(' ')[1]; // Bearer {firebase_uid}
+    const idToken = authHeader && authHeader.split(' ')[1]; // Bearer {firebase_id_token}
 
-    if (!firebaseUid) {
+    if (!idToken) {
       return res.status(401).json({
         success: false,
-        error: 'Authentication required'
+        error: 'Authentication token required'
       });
     }
 
-    // Store the Firebase UID for database operations
+    // Verify Firebase ID token
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
     req.user = {
-      uid: firebaseUid
+      uid: decodedToken.uid,
+      email: decodedToken.email,
+      name: decodedToken.name
     };
     
     next();
   } catch (error) {
     console.error('Authentication error:', error);
-    res.status(500).json({
+    res.status(401).json({
       success: false,
-      error: 'Authentication failed'
+      error: 'Invalid authentication token'
     });
   }
 };
@@ -141,8 +170,9 @@ app.get('/api/health', (req, res) => {
     success: true,
     message: 'Server is running',
     timestamp: new Date().toISOString(),
-    database: 'Firebase Firestore (Frontend)',
-    omdbApi: 'Connected'
+    database: 'Firebase Firestore (Connected)',
+    omdbApi: 'Connected',
+    firebase: 'Initialized'
   });
 });
 
@@ -354,9 +384,21 @@ app.get('/api/movies/:id', async (req, res) => {
 // 5. Get all reviews (public - no auth required)
 app.get('/api/reviews', async (req, res) => {
   try {
+    const reviewsRef = db.collection('reviews');
+    const snapshot = await reviewsRef.orderBy('createdAt', 'desc').get();
+    
+    const reviews = [];
+    snapshot.forEach(doc => {
+      reviews.push({
+        id: doc.id,
+        ...doc.data()
+      });
+    });
+
     res.json({
       success: true,
-      message: 'Call this from frontend with Firebase Firestore access'
+      count: reviews.length,
+      reviews
     });
   } catch (error) {
     console.error('Get reviews error:', error);
@@ -382,18 +424,24 @@ app.post('/api/reviews', authenticateUser, validateReview, async (req, res) => {
       rating,
       comment,
       userId: userUid,
-      userName: 'User', // Frontend will populate this from Firebase auth
+      userEmail: req.user.email,
+      userName: req.user.name || 'User',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
 
-    console.log('✅ Review data prepared for Firestore:', reviewData);
+    // Save to Firestore
+    const docRef = await db.collection('reviews').add(reviewData);
+
+    console.log('✅ Review saved to Firestore with ID:', docRef.id);
 
     res.status(201).json({
       success: true,
-      message: 'Review data ready for Firestore',
-      review: reviewData,
-      firestorePath: 'reviews'
+      message: 'Review created successfully',
+      review: {
+        id: docRef.id,
+        ...reviewData
+      }
     });
   } catch (error) {
     console.error('Create review error:', error);
@@ -414,6 +462,25 @@ app.put('/api/reviews/:id', authenticateUser, validateReview, async (req, res) =
     console.log('🔄 Updating review:', id);
     console.log('🔄 Update data:', { movieId, movieTitle, rating, comment });
 
+    // Check if review exists and belongs to user
+    const reviewRef = db.collection('reviews').doc(id);
+    const reviewDoc = await reviewRef.get();
+
+    if (!reviewDoc.exists) {
+      return res.status(404).json({
+        success: false,
+        error: 'Review not found'
+      });
+    }
+
+    const reviewData = reviewDoc.data();
+    if (reviewData.userId !== userUid) {
+      return res.status(403).json({
+        success: false,
+        error: 'Not authorized to update this review'
+      });
+    }
+
     const updateData = {
       movieId,
       movieTitle,
@@ -422,12 +489,18 @@ app.put('/api/reviews/:id', authenticateUser, validateReview, async (req, res) =
       updatedAt: new Date().toISOString()
     };
 
+    await reviewRef.update(updateData);
+
     res.json({
       success: true,
-      message: 'Review update data ready for Firestore',
+      message: 'Review updated successfully',
       reviewId: id,
-      updateData: updateData,
-      userId: userUid
+      review: {
+        id: id,
+        ...updateData,
+        userId: userUid,
+        createdAt: reviewData.createdAt
+      }
     });
   } catch (error) {
     console.error('Update review error:', error);
@@ -446,11 +519,31 @@ app.delete('/api/reviews/:id', authenticateUser, async (req, res) => {
 
     console.log('🗑️ Deleting review:', id, 'for user:', userUid);
 
+    // Check if review exists and belongs to user
+    const reviewRef = db.collection('reviews').doc(id);
+    const reviewDoc = await reviewRef.get();
+
+    if (!reviewDoc.exists) {
+      return res.status(404).json({
+        success: false,
+        error: 'Review not found'
+      });
+    }
+
+    const reviewData = reviewDoc.data();
+    if (reviewData.userId !== userUid) {
+      return res.status(403).json({
+        success: false,
+        error: 'Not authorized to delete this review'
+      });
+    }
+
+    await reviewRef.delete();
+
     res.json({ 
       success: true,
-      message: 'Review delete ready for Firestore',
-      reviewId: id,
-      userId: userUid
+      message: 'Review deleted successfully',
+      reviewId: id
     });
   } catch (error) {
     console.error('Delete review error:', error);
@@ -468,10 +561,24 @@ app.get('/api/my-reviews', authenticateUser, async (req, res) => {
     
     console.log('📋 Getting reviews for user:', userUid);
 
+    const reviewsRef = db.collection('reviews');
+    const snapshot = await reviewsRef
+      .where('userId', '==', userUid)
+      .orderBy('createdAt', 'desc')
+      .get();
+    
+    const reviews = [];
+    snapshot.forEach(doc => {
+      reviews.push({
+        id: doc.id,
+        ...doc.data()
+      });
+    });
+
     res.json({
       success: true,
-      message: 'Call this from frontend with Firebase Firestore access',
-      userId: userUid
+      count: reviews.length,
+      reviews
     });
   } catch (error) {
     console.error('Get user reviews error:', error);
@@ -499,8 +606,9 @@ app.get('/', (req, res) => {
     message: 'Movie Review API Server with OMDb Integration',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
-    database: 'Firebase Firestore (Frontend)',
+    database: 'Firebase Firestore (Connected)',
     omdbApi: 'Connected',
+    firebase: 'Initialized',
     endpoints: {
       health: '/api/health',
       movies: '/api/movies',
@@ -511,7 +619,7 @@ app.get('/', (req, res) => {
       debug: '/api/debug/review'
     },
     instructions: {
-      authentication: 'Use Firebase UID in Authorization header as Bearer token',
+      authentication: 'Use Firebase ID token in Authorization header as Bearer token',
       reviewCreation: 'Send { movieId, movieTitle, rating, comment } in request body'
     }
   });
@@ -551,15 +659,16 @@ app.listen(PORT, () => {
 🚀 Server running on port ${PORT}
 📡 Health check: http://localhost:${PORT}/api/health
 🎬 OMDb API: Connected with key ${OMDB_API_KEY}
-🗄️  Database: Firebase Firestore (handled by frontend)
+🗄️  Database: Firebase Firestore (Connected)
 📝 Review System: Ready (using movieId as primary identifier)
-🔐 Authentication: Firebase UID based
+🔐 Authentication: Firebase ID token based
 
 📋 Available Endpoints:
    GET  /api/health          - Health check
    GET  /api/movies          - Get popular movies
    GET  /api/movies/search   - Search movies
    GET  /api/movies/:id      - Get movie details
+   GET  /api/reviews         - Get all reviews
    POST /api/reviews         - Create review (auth required)
    PUT  /api/reviews/:id     - Update review (auth required)
    DELETE /api/reviews/:id   - Delete review (auth required)

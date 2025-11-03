@@ -8,7 +8,8 @@ import Movies from './movies';
 import MyReviews from './MyReviews';
 import About from './About';
 import Navigation from './Navigation';
-import { isAuthenticated, getUserData } from './api'; // Fixed import
+import { authService } from './auth';
+import { getUserData } from './api';
 import './index.css';
 
 function App() {
@@ -16,24 +17,44 @@ function App() {
   const [isAuthChecked, setIsAuthChecked] = useState(false);
 
   useEffect(() => {
-    if (isAuthenticated()) {
-      setUser(getUserData());
-    }
-    setIsAuthChecked(true);
+    // Set up auth state listener
+    const unsubscribe = authService.onAuthStateChange(async (firebaseUser) => {
+      if (firebaseUser) {
+        // Get complete user data from Firestore
+        const userData = await getUserData();
+        setUser(userData);
+      } else {
+        setUser(null);
+      }
+      setIsAuthChecked(true);
+    });
+
+    // Cleanup listener on unmount
+    return () => unsubscribe();
   }, []);
 
-  const handleAuthSuccess = (userData) => {
-    setUser(userData);
+  const handleAuthSuccess = async (userData) => {
+    // Get fresh user data from Firestore
+    const freshUserData = await getUserData();
+    setUser(freshUserData || userData);
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('authToken');
-    localStorage.removeItem('userData');
-    setUser(null);
+  const handleLogout = async () => {
+    try {
+      await authService.logout();
+      setUser(null);
+    } catch (error) {
+      console.error('Logout error:', error);
+    }
   };
 
   if (!isAuthChecked) {
-    return <div className="loading">Loading...</div>;
+    return (
+      <div className="loading-container">
+        <div className="loading-spinner"></div>
+        <p>Loading...</p>
+      </div>
+    );
   }
 
   return (

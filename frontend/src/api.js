@@ -1,16 +1,5 @@
-// api.js - Updated to work with backend API and Firebase Firestore
-import { 
-  collection, 
-  addDoc, 
-  getDocs, 
-  doc, 
-  updateDoc, 
-  deleteDoc, 
-  query, 
-  orderBy, 
-  where 
-} from 'firebase/firestore';
-import { db, auth } from './firebase-config';
+// api.js - Updated to work with backend API and Firebase Auth
+import { auth } from './firebase-config';
 
 const API_BASE_URL = 'http://localhost:5000/api';
 
@@ -18,6 +7,13 @@ const API_BASE_URL = 'http://localhost:5000/api';
 async function apiCall(endpoint, options = {}) {
   const url = `${API_BASE_URL}${endpoint}`;
   
+  // Get Firebase ID token for authenticated requests
+  let idToken = null;
+  const currentUser = auth.currentUser;
+  if (currentUser) {
+    idToken = await currentUser.getIdToken();
+  }
+
   const config = {
     headers: {
       'Content-Type': 'application/json',
@@ -25,6 +21,11 @@ async function apiCall(endpoint, options = {}) {
     },
     ...options,
   };
+
+  // Add Authorization header if user is authenticated
+  if (idToken) {
+    config.headers['Authorization'] = `Bearer ${idToken}`;
+  }
 
   if (config.body && typeof config.body === 'object') {
     config.body = JSON.stringify(config.body);
@@ -66,17 +67,11 @@ async function apiCall(endpoint, options = {}) {
 
 // Utility functions
 export const isAuthenticated = () => {
-  const user = auth.currentUser;
-  return !!user;
+  return !!auth.currentUser;
 };
 
-export const getToken = () => {
-  const user = auth.currentUser;
-  return user ? user.uid : null;
-};
-
-export const removeToken = () => {
-  // Handled by Firebase auth signOut
+export const getCurrentUser = () => {
+  return auth.currentUser;
 };
 
 export const getUserData = () => {
@@ -92,24 +87,26 @@ export const getUserData = () => {
   return null;
 };
 
-export const setUserData = (userData) => {
-  // Handled by Firebase auth
-};
-
 // Enhanced error handler
 export const handleAPIError = (error) => {
   console.error('API Error:', error);
   
   let userFriendlyMessage = error.message;
   
-  if (error.message.includes('Movie title, rating, and comment are required')) {
-    userFriendlyMessage = 'Please fill in all required fields: movie title, rating, and comment.';
-  } else if (error.message.includes('Movie ID or Title is required')) {
+  if (error.message.includes('Movie ID or Title is required')) {
     userFriendlyMessage = 'Please select a movie first.';
+  } else if (error.message.includes('Rating must be between 1 and 5')) {
+    userFriendlyMessage = 'Please select a rating between 1 and 5 stars.';
+  } else if (error.message.includes('Comment is required')) {
+    userFriendlyMessage = 'Please write a comment for your review.';
   } else if (error.message.includes('Network error') || error.message.includes('Failed to fetch')) {
     userFriendlyMessage = 'Unable to connect to server. Please check your connection and try again.';
   } else if (error.message.includes('401') || error.message.includes('Authentication required')) {
     userFriendlyMessage = 'Your session has expired. Please log in again.';
+  } else if (error.message.includes('403') || error.message.includes('Not authorized')) {
+    userFriendlyMessage = 'You are not authorized to perform this action.';
+  } else if (error.message.includes('404') || error.message.includes('not found')) {
+    userFriendlyMessage = 'The requested resource was not found.';
   }
   
   return userFriendlyMessage;
@@ -130,153 +127,44 @@ export const moviesAPI = {
   }
 };
 
-// Reviews API - Integrated with Backend + Firestore
+// Reviews API - Now fully handled by backend with Firebase Auth
 export const reviewsAPI = {
   getAllReviews: async () => {
-    // Get from Firestore directly
-    try {
-      const reviewsCollection = collection(db, 'reviews');
-      const reviewsQuery = query(reviewsCollection, orderBy('createdAt', 'desc'));
-      const querySnapshot = await getDocs(reviewsQuery);
-      const reviews = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      return { reviews };
-    } catch (error) {
-      console.error('Firestore get reviews error:', error);
-      throw new Error('Failed to fetch reviews from database');
-    }
+    return apiCall('/reviews');
   },
 
   getMyReviews: async () => {
-    // Get from Firestore with user filter
-    try {
-      const user = auth.currentUser;
-      if (!user) throw new Error('User not authenticated');
-
-      const reviewsCollection = collection(db, 'reviews');
-      const reviewsQuery = query(
-        reviewsCollection, 
-        where('userId', '==', user.uid),
-        orderBy('createdAt', 'desc')
-      );
-      const querySnapshot = await getDocs(reviewsQuery);
-      const reviews = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      return { reviews };
-    } catch (error) {
-      console.error('Firestore get my reviews error:', error);
-      throw new Error('Failed to fetch your reviews');
-    }
+    return apiCall('/my-reviews');
   },
 
   createReview: async (reviewData) => {
-    try {
-      const user = auth.currentUser;
-      if (!user) throw new Error('User not authenticated');
-
-      console.log('🎯 Sending review data to backend:', reviewData);
-
-      // Get validated data from backend
-      const backendResult = await apiCall('/reviews', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${user.uid}`
-        },
-        body: reviewData
-      });
-
-      console.log('✅ Backend response:', backendResult);
-
-      // Save to Firestore with backend-validated data
-      const reviewWithUser = {
-        ...backendResult.review,
-        userId: user.uid,
-        userName: user.displayName || user.email.split('@')[0]
-      };
-
-      const docRef = await addDoc(collection(db, 'reviews'), reviewWithUser);
-      
-      return {
-        review: {
-          id: docRef.id,
-          ...reviewWithUser
-        }
-      };
-    } catch (error) {
-      console.error('Create review error:', error);
-      throw error;
-    }
+    return apiCall('/reviews', {
+      method: 'POST',
+      body: reviewData
+    });
   },
 
   updateReview: async (reviewId, reviewData) => {
-    try {
-      const user = auth.currentUser;
-      if (!user) throw new Error('User not authenticated');
-
-      // Validate with backend
-      const backendResult = await apiCall(`/reviews/${reviewId}`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${user.uid}`
-        },
-        body: reviewData
-      });
-
-      // Update in Firestore
-      const reviewRef = doc(db, 'reviews', reviewId);
-      await updateDoc(reviewRef, backendResult.updateData);
-
-      return {
-        review: {
-          id: reviewId,
-          ...reviewData,
-          ...backendResult.updateData
-        }
-      };
-    } catch (error) {
-      console.error('Update review error:', error);
-      throw error;
-    }
+    return apiCall(`/reviews/${reviewId}`, {
+      method: 'PUT',
+      body: reviewData
+    });
   },
 
   deleteReview: async (reviewId) => {
-    try {
-      const user = auth.currentUser;
-      if (!user) throw new Error('User not authenticated');
-
-      // Verify with backend
-      await apiCall(`/reviews/${reviewId}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${user.uid}`
-        }
-      });
-
-      // Delete from Firestore
-      await deleteDoc(doc(db, 'reviews', reviewId));
-
-      return { success: true };
-    } catch (error) {
-      console.error('Delete review error:', error);
-      throw error;
-    }
+    return apiCall(`/reviews/${reviewId}`, {
+      method: 'DELETE'
+    });
   },
 };
 
 export default {
-  auth: {},
   movies: moviesAPI,
   reviews: reviewsAPI,
   utils: {
     isAuthenticated,
-    getToken,
-    removeToken,
+    getCurrentUser,
     getUserData,
-    setUserData,
     handleAPIError,
   },
 };

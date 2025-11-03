@@ -1,9 +1,7 @@
-// MyReviews.js
+// MyReviews.js - Updated to work with backend API
 import React, { useState, useEffect } from 'react';
-import { reviewsAPI, isAuthenticated, getUserData, handleAPIError } from './api'; // Fixed import
+import { reviewsAPI, isAuthenticated, getUserData, handleAPIError } from './api';
 import { useNavigate } from 'react-router-dom';
-import { db, auth } from './firebase-config';
-import { collection, addDoc, getDocs, doc, updateDoc, deleteDoc, query, orderBy } from 'firebase/firestore';
 
 const MyReviews = () => {
   const [reviews, setReviews] = useState([]);
@@ -14,101 +12,28 @@ const MyReviews = () => {
   const [newReview, setNewReview] = useState({ movieTitle: '', rating: 0, comment: '' });
   const navigate = useNavigate();
 
-  // Default reviews data
-  const defaultReviews = [
-    {
-      id: 'default-1',
-      movieTitle: 'Inception',
-      rating: 5,
-      comment: 'Mind-bending masterpiece with incredible visuals and a thought-provoking plot that keeps you engaged from start to finish.',
-      userId: 'default-user-1',
-      userName: 'MovieLover42',
-      createdAt: new Date('2024-01-15'),
-      updatedAt: new Date('2024-01-15')
-    },
-    {
-      id: 'default-2',
-      movieTitle: 'The Shawshank Redemption',
-      rating: 5,
-      comment: 'An absolute classic! Tim Robbins and Morgan Freeman deliver powerful performances in this inspiring story of hope and friendship.',
-      userId: 'default-user-2',
-      userName: 'CinemaFan',
-      createdAt: new Date('2024-01-10'),
-      updatedAt: new Date('2024-01-10')
-    },
-    {
-      id: 'default-3',
-      movieTitle: 'Spirited Away',
-      rating: 4,
-      comment: 'Beautiful animation and magical storytelling. Studio Ghibli at its finest, though some scenes might be intense for younger viewers.',
-      userId: 'default-user-3',
-      userName: 'AnimeEnthusiast',
-      createdAt: new Date('2024-01-05'),
-      updatedAt: new Date('2024-01-05')
-    },
-    {
-      id: 'default-4',
-      movieTitle: 'The Dark Knight',
-      rating: 5,
-      comment: 'Heath Ledger\'s Joker performance alone makes this worth watching. A superhero movie that transcends the genre.',
-      userId: 'default-user-4',
-      userName: 'ComicBookGuy',
-      createdAt: new Date('2024-01-01'),
-      updatedAt: new Date('2024-01-01')
-    },
-    {
-      id: 'default-5',
-      movieTitle: 'Parasite',
-      rating: 4,
-      comment: 'Brilliant social commentary wrapped in a thrilling package. The class divide has never been more dramatically portrayed.',
-      userId: 'default-user-5',
-      userName: 'FilmCritic101',
-      createdAt: new Date('2023-12-28'),
-      updatedAt: new Date('2023-12-28')
-    }
-  ];
-
   useEffect(() => {
-    loadAllReviews();
+    loadMyReviews();
   }, []);
 
-  const loadAllReviews = async () => {
+  const loadMyReviews = async () => {
+    if (!isAuthenticated()) {
+      setError('Please log in to view your reviews');
+      setLoading(false);
+      return;
+    }
+
     try {
       setError('');
       setLoading(true);
-      // Load reviews from Firebase
-      const reviewsCollection = collection(db, 'reviews');
-      const reviewsQuery = query(reviewsCollection, orderBy('createdAt', 'desc'));
-      const querySnapshot = await getDocs(reviewsQuery);
-      const reviewsData = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      
-      // If no reviews in database, use default reviews
-      if (reviewsData.length === 0) {
-        setReviews(defaultReviews);
-      } else {
-        setReviews(reviewsData);
-      }
-    } catch (error) {
-      console.error('Error loading reviews from Firebase:', error);
-      setError('Failed to load reviews from Firebase');
-      // If there's an error loading from Firebase, use default reviews
-      setReviews(defaultReviews);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadMyReviews = async () => {
-    if (!isAuthenticated()) return;
-
-    try {
       const result = await reviewsAPI.getMyReviews();
-      // Could use this for filtering if needed, but for now we show all reviews
+      setReviews(result.reviews || []);
     } catch (error) {
       console.error('Error loading my reviews:', error);
+      const userFriendlyError = handleAPIError(error);
+      setError(userFriendlyError);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -119,45 +44,35 @@ const MyReviews = () => {
 
     try {
       setError('');
-      // Only delete from Firebase if it's not a default review
-      if (!reviewId.startsWith('default-')) {
-        await deleteDoc(doc(db, 'reviews', reviewId));
-      }
+      await reviewsAPI.deleteReview(reviewId);
       setReviews(prev => prev.filter(review => review.id !== reviewId));
       setSuccessMessage('Review deleted successfully!');
       setTimeout(() => setSuccessMessage(''), 3000);
     } catch (error) {
-      console.error('Error deleting review from Firebase:', error);
-      setError('Failed to delete review from Firebase. Please try again.');
-      setTimeout(() => setError(''), 5000);
+      console.error('Error deleting review:', error);
+      const userFriendlyError = handleAPIError(error);
+      setError(userFriendlyError);
     }
   };
 
   const updateReview = async (reviewId, updatedData) => {
     try {
-      // Only update in Firebase if it's not a default review
-      if (!reviewId.startsWith('default-')) {
-        const reviewRef = doc(db, 'reviews', reviewId);
-        await updateDoc(reviewRef, {
-          ...updatedData,
-          updatedAt: new Date()
-        });
-      }
-
+      const result = await reviewsAPI.updateReview(reviewId, updatedData);
       setReviews(prev => prev.map(review =>
-        review.id === reviewId ? { ...review, ...updatedData, updatedAt: new Date() } : review
+        review.id === reviewId ? result.review : review
       ));
       setSuccessMessage('Review updated successfully!');
       setTimeout(() => setSuccessMessage(''), 3000);
     } catch (error) {
-      console.error('Error updating review in Firebase:', error);
-      setError('Failed to update review in Firebase. Please try again.');
+      console.error('Error updating review:', error);
+      const userFriendlyError = handleAPIError(error);
+      setError(userFriendlyError);
     }
   };
 
   const refreshReviews = () => {
     setLoading(true);
-    loadAllReviews();
+    loadMyReviews();
   };
 
   const handleBackToMovies = () => {
@@ -187,27 +102,21 @@ const MyReviews = () => {
     const reviewData = {
       movieTitle: newReview.movieTitle.trim(),
       rating: parseInt(newReview.rating),
-      comment: newReview.comment.trim(),
-      userId: auth.currentUser ? auth.currentUser.uid : null,
-      userName: auth.currentUser ? auth.currentUser.displayName || auth.currentUser.email.split('@')[0] : 'Anonymous',
-      createdAt: new Date(),
-      updatedAt: new Date()
+      comment: newReview.comment.trim()
     };
 
     try {
-      // Save to Firebase
-      const docRef = await addDoc(collection(db, 'reviews'), reviewData);
-      const newReviewWithId = { id: docRef.id, ...reviewData };
-
-      setReviews(prev => [newReviewWithId, ...prev]);
+      const result = await reviewsAPI.createReview(reviewData);
+      setReviews(prev => [result.review, ...prev]);
       setNewReview({ movieTitle: '', rating: 0, comment: '' });
       setShowReviewForm(false);
       setError('');
       setSuccessMessage('Review created successfully!');
       setTimeout(() => setSuccessMessage(''), 3000);
     } catch (error) {
-      console.error('Error creating review in Firebase:', error);
-      setError('Failed to save review to Firebase');
+      console.error('Error creating review:', error);
+      const userFriendlyError = handleAPIError(error);
+      setError(userFriendlyError);
     }
   };
 
@@ -233,13 +142,8 @@ const MyReviews = () => {
     return (
       <div className="movies-container">
         <div className="loading">
-          {error && error.includes('index') ? 'Setting up database...' : 'Loading your reviews...'}
+          Loading your reviews...
         </div>
-        {error && error.includes('index') && (
-          <div className="info-message">
-            <p>⏳ Database is being optimized. This may take a moment...</p>
-          </div>
-        )}
       </div>
     );
   }
@@ -247,8 +151,8 @@ const MyReviews = () => {
   return (
     <div className="movies-container">
       <div className="movies-header">
-        <h1>📝 All Reviews</h1>
-        <p>View all movie reviews and add your own</p>
+        <h1>📝 My Reviews</h1>
+        <p>View and manage all your movie reviews</p>
 
         <div className="movies-actions">
           {isAuthenticated() && (
@@ -345,12 +249,7 @@ const MyReviews = () => {
 
       {error && (
         <div className="error-message">
-          {error.includes('index') ? '⏳' : '❌'} {error}
-          {error.includes('index') && (
-            <button onClick={refreshReviews} style={{marginLeft: '10px'}}>
-              Try Again
-            </button>
-          )}
+          ❌ {error}
         </div>
       )}
 
@@ -374,7 +273,7 @@ const MyReviews = () => {
               <div className="review-header">
                 <h3 className="movie-title">{review.movieTitle}</h3>
                 <div className="review-rating">
-                  <StarRating rating={review.rating} />
+                  <StarRating rating={review.rating} readonly={true} />
                   <span className="rating-value">{review.rating}/5</span>
                 </div>
               </div>
@@ -387,7 +286,6 @@ const MyReviews = () => {
               
               <div className="review-footer">
                 <div className="reviewer-info">
-                  <span className="reviewer-name">By {review.userName}</span>
                   <span className="review-date">
                     Reviewed on {review.createdAt ? new Date(review.createdAt).toLocaleDateString() : 'Unknown date'}
                   </span>
@@ -399,32 +297,27 @@ const MyReviews = () => {
                 </div>
                 
                 <div className="review-actions">
-                  {isAuthenticated() && currentUser && 
-                   (review.userId === currentUser.id || review.userId.startsWith('default-')) && (
-                    <>
-                      <button
-                        className="edit-btn"
-                        onClick={() => {
-                          const newComment = prompt('Edit your comment:', review.comment);
-                          if (newComment !== null) {
-                            updateReview(review.id, {
-                              movieTitle: review.movieTitle,
-                              rating: review.rating,
-                              comment: newComment
-                            });
-                          }
-                        }}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        className="delete-btn"
-                        onClick={() => deleteReview(review.id)}
-                      >
-                        Delete
-                      </button>
-                    </>
-                  )}
+                  <button
+                    className="edit-btn"
+                    onClick={() => {
+                      const newComment = prompt('Edit your comment:', review.comment);
+                      if (newComment !== null) {
+                        updateReview(review.id, {
+                          movieTitle: review.movieTitle,
+                          rating: review.rating,
+                          comment: newComment
+                        });
+                      }
+                    }}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    className="delete-btn"
+                    onClick={() => deleteReview(review.id)}
+                  >
+                    Delete
+                  </button>
                 </div>
               </div>
             </div>
